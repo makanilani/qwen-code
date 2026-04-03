@@ -22,6 +22,7 @@ import {
   ListPromptsResultSchema,
   ListRootsRequestSchema,
   ReadResourceResultSchema,
+  ToolListChangedNotificationSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
 import type { Config, MCPServerConfig } from '../config/config.js';
@@ -100,6 +101,7 @@ export class McpClient {
   private transport: Transport | undefined;
   private status: MCPServerStatus = MCPServerStatus.DISCONNECTED;
   private isDisconnecting = false;
+  private isRefreshingTools = false;
 
   constructor(
     private readonly serverName: string,
@@ -109,6 +111,8 @@ export class McpClient {
     private readonly workspaceContext: WorkspaceContext,
     private readonly debugMode: boolean,
     private readonly sendSdkMcpMessage?: SendSdkMcpMessage,
+    private readonly cliConfig?: Config,
+    private readonly onToolsChanged?: () => void,
   ) {
     this.client = new Client({
       name: `qwen-cli-mcp-client-${this.serverName}`,
@@ -149,6 +153,17 @@ export class McpClient {
           roots,
         };
       });
+
+      // Register handler for dynamic tool list changes BEFORE connecting.
+      // Some MCP servers (e.g., Google Colab) send notifications/tools/list_changed
+      // immediately during or right after the connect handshake, so the handler
+      // must be in place before we call connect().
+      this.client.setNotificationHandler(
+        ToolListChangedNotificationSchema,
+        async () => {
+          await this.handleToolsListChanged();
+        },
+      );
 
       await this.client.connect(this.transport, {
         timeout: this.serverConfig.timeout,
@@ -246,7 +261,65 @@ export class McpClient {
   private async discoverPrompts(): Promise<Prompt[]> {
     return discoverPrompts(this.serverName, this.client, this.promptRegistry);
   }
+
+  /**
+   * Handles the `notifications/tools/list_changed` notification from the MCP server.
+   * Removes existing tools for this server and re-discovers them.
+   */
+  private async handleToolsListChanged(): Promise<void> {
+    if (this.status !== MCPServerStatus.CONNECTED) {
+      debugLogger.warn(
+        `Received tools/list_changed for disconnected server '${this.serverName}'`,
+      );
+      return;
+    }
+
+    // Guard against concurrent refreshes — if the server sends multiple
+    // list_changed notifications rapidly, only the first one runs.
+    if (this.isRefreshingTools) {
+      debugLogger.info(
+        `Server '${this.serverName}' announced tool list change but refresh already in progress, skipping`,
+      );
+      return;
+    }
+
+    debugLogger.info(
+      `Server '${this.serverName}' announced tool list change, refreshing tools`,
+    );
+
+    this.isRefreshingTools = true;
+    try {
+      // Remove existing tools from this server
+      this.toolRegistry.removeMcpToolsByServer(this.serverName);
+
+      // Re-discover tools if we have the config
+      if (this.cliConfig) {
+        const tools = await this.discoverTools(this.cliConfig);
+        for (const tool of tools) {
+          this.toolRegistry.registerTool(tool);
+        }
+        debugLogger.info(
+          `Refreshed ${tools.length} tools from server '${this.serverName}'`,
+        );
+      }
+
+      // Notify listeners (e.g., McpClientManager to emit update event)
+      this.onToolsChanged?.();
+    } catch (error) {
+      debugLogger.error(
+        `Failed to refresh tools from server '${this.serverName}': ${getErrorMessage(error)}`,
+      );
+    } finally {
+      this.isRefreshingTools = false;
+    }
+  }
 }
+
+/**
+ * Map to track which servers are currently refreshing tools (for connectAndDiscover path).
+ * Prevents concurrent refreshes when the server sends rapid list_changed notifications.
+ */
+const serverRefreshingTools: Map<string, boolean> = new Map();
 
 /**
  * Map to track the status of each MCP server within the core package
@@ -572,6 +645,50 @@ export async function connectAndDiscover(
       debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
       updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
     };
+
+    // Register handler for dynamic tool list changes IMMEDIATELY after connecting.
+    // Some MCP servers (e.g., Google Colab) send notifications/tools/list_changed
+    // during the discovery window, so the handler must be registered before
+    // we call discoverPrompts/discoverTools.
+    mcpClient.setNotificationHandler(
+      ToolListChangedNotificationSchema,
+      async () => {
+        // Guard against concurrent refreshes
+        if (serverRefreshingTools.get(mcpServerName)) {
+          debugLogger.info(
+            `Server '${mcpServerName}' announced tool list change but refresh already in progress, skipping`,
+          );
+          return;
+        }
+
+        debugLogger.info(
+          `Server '${mcpServerName}' announced tool list change, refreshing tools`,
+        );
+
+        serverRefreshingTools.set(mcpServerName, true);
+        try {
+          toolRegistry.removeMcpToolsByServer(mcpServerName);
+          const refreshedTools = await discoverTools(
+            mcpServerName,
+            mcpServerConfig,
+            mcpClient!,
+            cliConfig,
+          );
+          for (const tool of refreshedTools) {
+            toolRegistry.registerTool(tool);
+          }
+          debugLogger.info(
+            `Refreshed ${refreshedTools.length} tools from server '${mcpServerName}'`,
+          );
+        } catch (error) {
+          debugLogger.error(
+            `Failed to refresh tools from server '${mcpServerName}': ${getErrorMessage(error)}`,
+          );
+        } finally {
+          serverRefreshingTools.set(mcpServerName, false);
+        }
+      },
+    );
 
     // Attempt to discover both prompts and tools
     const prompts = await discoverPrompts(

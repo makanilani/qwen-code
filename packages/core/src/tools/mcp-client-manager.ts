@@ -114,6 +114,10 @@ export class McpClientManager {
           this.cliConfig.getWorkspaceContext(),
           this.cliConfig.getDebugMode(),
           sdkCallback,
+          cliConfig,
+          () => {
+            this.eventEmitter?.emit('mcp-client-update', this.clients);
+          },
         );
         this.clients.set(name, client);
 
@@ -185,6 +189,10 @@ export class McpClientManager {
       this.cliConfig.getWorkspaceContext(),
       this.cliConfig.getDebugMode(),
       sdkCallback,
+      cliConfig,
+      () => {
+        this.eventEmitter?.emit('mcp-client-update', this.clients);
+      },
     );
 
     this.clients.set(serverName, client);
@@ -518,6 +526,7 @@ export class McpClientManager {
         this.cliConfig.getWorkspaceContext(),
         this.cliConfig.getDebugMode(),
         sdkCallback,
+        this.cliConfig,
       );
       this.clients.set(serverName, client);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
