@@ -267,9 +267,13 @@ export class McpClient {
    * Removes existing tools for this server and re-discovers them.
    */
   private async handleToolsListChanged(): Promise<void> {
-    if (this.status !== MCPServerStatus.CONNECTED) {
-      debugLogger.warn(
-        `Received tools/list_changed for disconnected server '${this.serverName}'`,
+    // The fact that we just received a notification proves the server's transport
+    // is still alive. Only skip if we're actively disconnecting (user-initiated
+    // disconnect() call). Non-fatal SDK errors (e.g., unknown progress tokens)
+    // may have set status to DISCONNECTED incorrectly, but the transport is fine.
+    if (this.isDisconnecting) {
+      debugLogger.info(
+        `Server '${this.serverName}' announced tool list change but disconnect is in progress, skipping`,
       );
       return;
     }

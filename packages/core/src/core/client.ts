@@ -126,6 +126,12 @@ export class GeminiClient {
    */
   private hasFailedCompressionAttempt = false;
 
+  /**
+   * Tracks whether the mcp-client-update event listener has been registered.
+   * Prevents duplicate listeners when startChat() is called multiple times.
+   */
+  private mcpToolsChangeListenerRegistered = false;
+
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
   }
@@ -198,6 +204,32 @@ export class GeminiClient {
     this.getChat().setTools(tools);
   }
 
+  /**
+   * Registers a listener for 'mcp-client-update' events.
+   * When MCP tools change dynamically (e.g., Google Colab sends
+   * notifications/tools/list_changed), this updates the LLM's tool list
+   * so the next agent turn sees the updated tool set.
+   */
+  private registerMcpToolsChangeListener(): void {
+    if (this.mcpToolsChangeListenerRegistered) {
+      return;
+    }
+    const eventEmitter = this.config.getEventEmitter();
+    if (!eventEmitter) {
+      return;
+    }
+    this.mcpToolsChangeListenerRegistered = true;
+    eventEmitter.on('mcp-client-update', () => {
+      try {
+        this.setTools();
+      } catch (error) {
+        debugLogger.error(
+          `Failed to update tools on MCP change: ${getErrorMessage(error)}`,
+        );
+      }
+    });
+  }
+
   async resetChat(): Promise<void> {
     await this.startChat();
   }
@@ -259,6 +291,7 @@ export class GeminiClient {
       );
 
       this.setTools();
+      this.registerMcpToolsChangeListener();
 
       return this.chat;
     } catch (error) {

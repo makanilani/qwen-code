@@ -16,6 +16,7 @@ import {
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
+import { EventEmitter } from 'node:events';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
   AuthType,
@@ -292,6 +293,7 @@ describe('Gemini Client (client.ts)', () => {
     const mockToolRegistry = {
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getTool: vi.fn().mockReturnValue(null),
+      getAllTools: vi.fn().mockReturnValue([]),
     };
     const fileService = new FileDiscoveryService('/test/dir');
     const contentGeneratorConfig: ContentGeneratorConfig = {
@@ -365,6 +367,7 @@ describe('Gemini Client (client.ts)', () => {
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getEventEmitter: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
         debug: vi.fn(),
         info: vi.fn(),
@@ -2691,5 +2694,256 @@ Other open files:
 
     // Note: there is currently no "fallback mode" model routing; the model used
     // is always the one explicitly requested by the caller.
+  });
+
+  describe('Dynamic MCP Tool Discovery', () => {
+    it('should register mcp-client-update listener when eventEmitter is available', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      expect(eventEmitter.listenerCount('mcp-client-update')).toBe(1);
+    });
+
+    it('should not register listener when eventEmitter is undefined', async () => {
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(undefined);
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      expect(newClient.getChat()).toBeDefined();
+    });
+
+    it('should call setTools when mcp-client-update event is emitted', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const dynamicToolRegistry = {
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([
+            {
+              name: 'tool1',
+              description: 'Tool 1',
+              parametersJsonSchema: { type: 'object' },
+            },
+          ]),
+        getTool: vi.fn().mockReturnValue(null),
+        getAllTools: vi.fn().mockReturnValue([]),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue(
+        dynamicToolRegistry as unknown as ReturnType<
+          typeof mockConfig.getToolRegistry
+        >,
+      );
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      expect(dynamicToolRegistry.getFunctionDeclarations).toHaveBeenCalledTimes(
+        1,
+      );
+
+      // Update the mock to return new tools (simulating dynamic tool addition)
+      const newTools = [
+        {
+          name: 'tool1',
+          description: 'Tool 1',
+          parametersJsonSchema: { type: 'object' },
+        },
+        {
+          name: 'colab_new_tool',
+          description: 'New Colab Tool',
+          parametersJsonSchema: { type: 'object' },
+        },
+      ];
+      dynamicToolRegistry.getFunctionDeclarations.mockReturnValue(newTools);
+
+      eventEmitter.emit('mcp-client-update');
+
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      // Verify the second call returned the updated tools
+      const secondCallResult =
+        dynamicToolRegistry.getFunctionDeclarations.mock.results[1].value;
+      expect(secondCallResult).toHaveLength(2);
+      expect(secondCallResult[1].name).toBe('colab_new_tool');
+    });
+
+    it('should not register duplicate listeners on multiple startChat calls', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+      await newClient.resetChat();
+
+      expect(eventEmitter.listenerCount('mcp-client-update')).toBe(1);
+    });
+
+    it('should handle setTools errors gracefully without crashing the event loop', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      // Make the registry throw on next call
+      const dynamicToolRegistry = {
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([
+            {
+              name: 'tool1',
+              description: 'Tool 1',
+              parametersJsonSchema: { type: 'object' },
+            },
+          ]),
+        getTool: vi.fn().mockReturnValue(null),
+        getAllTools: vi.fn().mockReturnValue([]),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue(
+        dynamicToolRegistry as unknown as ReturnType<
+          typeof mockConfig.getToolRegistry
+        >,
+      );
+
+      // First event works
+      eventEmitter.emit('mcp-client-update');
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      // Now make it throw
+      dynamicToolRegistry.getFunctionDeclarations.mockImplementationOnce(() => {
+        throw new Error('Registry failure');
+      });
+
+      // Emit again — should not throw or crash
+      eventEmitter.emit('mcp-client-update');
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      // Restore and emit a third time — should still work
+      dynamicToolRegistry.getFunctionDeclarations.mockReturnValue([
+        {
+          name: 'tool1',
+          description: 'Tool 1',
+          parametersJsonSchema: { type: 'object' },
+        },
+      ]);
+      eventEmitter.emit('mcp-client-update');
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    it('should handle empty tool list gracefully', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const dynamicToolRegistry = {
+        getFunctionDeclarations: vi
+          .fn()
+          .mockReturnValue([
+            {
+              name: 'tool1',
+              description: 'Tool 1',
+              parametersJsonSchema: { type: 'object' },
+            },
+          ]),
+        getTool: vi.fn().mockReturnValue(null),
+        getAllTools: vi.fn().mockReturnValue([]),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue(
+        dynamicToolRegistry as unknown as ReturnType<
+          typeof mockConfig.getToolRegistry
+        >,
+      );
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      // Simulate mid-refresh state where registry returns empty
+      dynamicToolRegistry.getFunctionDeclarations.mockReturnValue([]);
+
+      eventEmitter.emit('mcp-client-update');
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(2);
+      });
+
+      // Restore tools
+      dynamicToolRegistry.getFunctionDeclarations.mockReturnValue([
+        {
+          name: 'tool1',
+          description: 'Tool 1',
+          parametersJsonSchema: { type: 'object' },
+        },
+      ]);
+      eventEmitter.emit('mcp-client-update');
+      await vi.waitFor(() => {
+        expect(
+          dynamicToolRegistry.getFunctionDeclarations,
+        ).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    it('should handle rapid-fire events without issue', async () => {
+      const eventEmitter = new EventEmitter();
+      vi.mocked(mockConfig.getEventEmitter).mockReturnValue(eventEmitter);
+
+      const callCount = { value: 0 };
+      const dynamicToolRegistry = {
+        getFunctionDeclarations: vi.fn().mockImplementation(() => {
+          callCount.value++;
+          return [
+            {
+              name: `tool${callCount.value}`,
+              description: `Tool ${callCount.value}`,
+              parametersJsonSchema: { type: 'object' },
+            },
+          ];
+        }),
+        getTool: vi.fn().mockReturnValue(null),
+        getAllTools: vi.fn().mockReturnValue([]),
+      };
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue(
+        dynamicToolRegistry as unknown as ReturnType<
+          typeof mockConfig.getToolRegistry
+        >,
+      );
+
+      const newClient = new GeminiClient(mockConfig);
+      await newClient.initialize();
+
+      const initialCalls = callCount.value;
+
+      // Fire 5 rapid events
+      eventEmitter.emit('mcp-client-update');
+      eventEmitter.emit('mcp-client-update');
+      eventEmitter.emit('mcp-client-update');
+      eventEmitter.emit('mcp-client-update');
+      eventEmitter.emit('mcp-client-update');
+
+      // All should be processed
+      await vi.waitFor(() => {
+        expect(callCount.value).toBe(initialCalls + 5);
+      });
+    });
   });
 });

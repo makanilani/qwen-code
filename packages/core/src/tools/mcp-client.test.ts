@@ -634,7 +634,7 @@ describe('mcp-client', () => {
       expect(removeMcpToolsByServer).toHaveBeenCalledTimes(1);
     });
 
-    it('should handle notification gracefully when disconnected', async () => {
+    it('should handle notification gracefully when disconnecting', async () => {
       const removeMcpToolsByServer = vi.fn();
       let capturedHandler: (() => Promise<void>) | undefined;
       const mockedClient = {
@@ -670,15 +670,70 @@ describe('mcp-client', () => {
       );
 
       await client.connect();
-      // Disconnect to set internal status back to DISCONNECTED
+      // Disconnect to set isDisconnecting flag to true
       await client.disconnect();
 
-      // Simulate notification while disconnected
+      // Simulate notification while disconnecting
       expect(capturedHandler).toBeDefined();
       await capturedHandler!();
 
-      // Should not attempt to remove tools when disconnected
+      // Should not attempt to remove tools when actively disconnecting
       expect(removeMcpToolsByServer).not.toHaveBeenCalled();
+    });
+
+    it('should refresh tools when notification arrives even if status is DISCONNECTED but not actively disconnecting', async () => {
+      // This tests the scenario where a non-fatal SDK error (e.g., unknown progress token)
+      // incorrectly set status to DISCONNECTED, but the transport is still alive.
+      // The notification proves the server is still responsive, so we should proceed.
+      const removeMcpToolsByServer = vi.fn();
+      const registerTool = vi.fn();
+      let capturedHandler: (() => Promise<void>) | undefined;
+      const mockedClient = {
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+        close: vi.fn(),
+        getStatus: vi.fn().mockReturnValue('disconnected'),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        setNotificationHandler: vi.fn((_schema, handler) => {
+          capturedHandler = handler;
+        }),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'test-server',
+        { command: 'test' },
+        {
+          registerTool,
+          removeMcpToolsByServer,
+        } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+        undefined,
+        {} as Config,
+        () => {}, // onToolsChanged
+      );
+
+      // Connect (this sets status to CONNECTED internally, but mock doesn't actually connect)
+      await client.connect();
+
+      // Manually set status to DISCONNECTED (simulating what happens when onerror fires for a non-fatal error)
+      // WITHOUT setting isDisconnecting = true (which only disconnect() does)
+      (client as unknown as { status: string }).status = 'disconnected';
+
+      // Simulate notification — should proceed because isDisconnecting is false
+      expect(capturedHandler).toBeDefined();
+      await capturedHandler!();
+
+      // Should still attempt to remove and re-register tools
+      expect(removeMcpToolsByServer).toHaveBeenCalledWith('test-server');
     });
 
     it('should log error and continue when discoverTools fails during refresh', async () => {

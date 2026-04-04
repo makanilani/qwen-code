@@ -1695,6 +1695,10 @@ export class Config {
     return this.geminiClient;
   }
 
+  getEventEmitter(): EventEmitter | undefined {
+    return this.eventEmitter;
+  }
+
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
       this.cronScheduler = new CronScheduler();
