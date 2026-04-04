@@ -86,3 +86,14 @@ storybook-static
 
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
+
+# Local investigation docs (personal reference)
+investigation/dynamic-mcp-tool-discovery/ARCHITECTURE.md
+investigation/dynamic-mcp-tool-discovery/CRITICAL_REVIEW.md
+investigation/dynamic-mcp-tool-discovery/HANDOUT.md
+investigation/dynamic-mcp-tool-discovery/INVESTIGATION_STATUS.md
+investigation/dynamic-mcp-tool-discovery/SELF_REVIEW.md
+investigation/dynamic-mcp-tool-discovery/SUMMARY.md
+investigation/dynamic-mcp-tool-discovery/verify.sh
+investigation/dynamic-mcp-tool-discovery/DEBUGGING_GUIDE.md
+scripts/update_local_binary.sh
