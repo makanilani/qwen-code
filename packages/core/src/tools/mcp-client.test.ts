@@ -15,7 +15,6 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
-  connectAndDiscover,
   createTransport,
   hasNetworkTransport,
   isEnabled,
@@ -806,13 +805,14 @@ describe('mcp-client', () => {
     });
   });
 
-  describe('connectAndDiscover notification handler', () => {
-    it('should register notification handler BEFORE discoverPrompts/discoverTools to catch early notifications', async () => {
+  describe('McpClient notification handler', () => {
+    it('should register notification handler BEFORE connect() to catch early notifications', async () => {
       const callOrder: string[] = [];
       let capturedHandler: (() => Promise<void>) | undefined;
 
       const mockedClient = {
-        connect: vi.fn(),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
         close: vi.fn(),
         onerror: null as ((error: Error) => void) | null,
         registerCapabilities: vi.fn(),
@@ -835,9 +835,9 @@ describe('mcp-client', () => {
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
       );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
       vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
         tool: () =>
           Promise.resolve({
@@ -857,6 +857,7 @@ describe('mcp-client', () => {
         getMcpServers: () => ({}),
         getMcpServerCommand: () => undefined,
         isTrustedFolder: () => true,
+        getDebugMode: () => false,
       } as unknown as Config;
 
       const mockToolRegistry = {
@@ -864,36 +865,36 @@ describe('mcp-client', () => {
         removeMcpToolsByServer: vi.fn(),
       } as unknown as ToolRegistry;
 
-      const mockPromptRegistry = {
-        clear: vi.fn(),
-      } as unknown as PromptRegistry;
-
-      await connectAndDiscover(
+      const client = new McpClient(
         'test-server',
         { command: 'test' },
         mockToolRegistry,
-        mockPromptRegistry,
-        false,
+        {} as PromptRegistry,
         {
           getDirectories: () => [],
           onDirectoriesChanged: vi.fn().mockReturnValue(() => {}),
         } as unknown as WorkspaceContext,
+        false,
+        undefined,
         mockCliConfig,
+        () => {},
       );
 
-      // Notification handler MUST be registered before any discovery calls
+      await client.connect();
+
+      // Notification handler MUST be registered before connect resolves
       expect(callOrder).toContain('setNotificationHandler');
-      // The handler should be available (not undefined) after connectAndDiscover
       expect(capturedHandler).toBeDefined();
     });
 
-    it('should register notification handler and refresh tools on tools/list_changed', async () => {
+    it('should refresh tools on tools/list_changed notification', async () => {
       const removeMcpToolsByServer = vi.fn();
       const registerTool = vi.fn();
       let capturedHandler: (() => Promise<void>) | undefined;
 
       const mockedClient = {
-        connect: vi.fn(),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
         close: vi.fn(),
         onerror: null as ((error: Error) => void) | null,
         registerCapabilities: vi.fn(),
@@ -910,14 +911,14 @@ describe('mcp-client', () => {
             },
           ],
         }),
-        getServerCapabilities: vi.fn().mockReturnValue(null),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: null }),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
       );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
       vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
         tool: () =>
           Promise.resolve({
@@ -937,6 +938,7 @@ describe('mcp-client', () => {
         getMcpServers: () => ({}),
         getMcpServerCommand: () => undefined,
         isTrustedFolder: () => true,
+        getDebugMode: () => false,
       } as unknown as Config;
 
       const mockToolRegistry = {
@@ -944,22 +946,22 @@ describe('mcp-client', () => {
         removeMcpToolsByServer,
       } as unknown as ToolRegistry;
 
-      const mockPromptRegistry = {
-        clear: vi.fn(),
-      } as unknown as PromptRegistry;
-
-      await connectAndDiscover(
+      const client = new McpClient(
         'test-server',
         { command: 'test' },
         mockToolRegistry,
-        mockPromptRegistry,
-        false,
+        {} as PromptRegistry,
         {
           getDirectories: () => [],
           onDirectoriesChanged: vi.fn().mockReturnValue(() => {}),
         } as unknown as WorkspaceContext,
+        false,
+        undefined,
         mockCliConfig,
+        () => {},
       );
+
+      await client.connect();
 
       // Verify handler was registered
       expect(capturedHandler).toBeDefined();
@@ -979,7 +981,8 @@ describe('mcp-client', () => {
       let mcpToToolCallCount = 0;
 
       const mockedClient = {
-        connect: vi.fn(),
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
         close: vi.fn(),
         onerror: null as ((error: Error) => void) | null,
         registerCapabilities: vi.fn(),
@@ -996,14 +999,14 @@ describe('mcp-client', () => {
             },
           ],
         }),
-        getServerCapabilities: vi.fn().mockReturnValue(null),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: null }),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
       );
-      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
-        {} as SdkClientStdioLib.StdioClientTransport,
-      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
       // First call to mcpToTool succeeds, second throws during refresh
       vi.mocked(GenAiLib.mcpToTool).mockImplementation(() => {
         mcpToToolCallCount++;
@@ -1030,6 +1033,7 @@ describe('mcp-client', () => {
         getMcpServers: () => ({}),
         getMcpServerCommand: () => undefined,
         isTrustedFolder: () => true,
+        getDebugMode: () => false,
       } as unknown as Config;
 
       const mockToolRegistry = {
@@ -1037,22 +1041,22 @@ describe('mcp-client', () => {
         removeMcpToolsByServer,
       } as unknown as ToolRegistry;
 
-      const mockPromptRegistry = {
-        clear: vi.fn(),
-      } as unknown as PromptRegistry;
-
-      await connectAndDiscover(
+      const client = new McpClient(
         'test-server',
         { command: 'test' },
         mockToolRegistry,
-        mockPromptRegistry,
-        false,
+        {} as PromptRegistry,
         {
           getDirectories: () => [],
           onDirectoriesChanged: vi.fn().mockReturnValue(() => {}),
         } as unknown as WorkspaceContext,
+        false,
+        undefined,
         mockCliConfig,
+        () => {},
       );
+
+      await client.connect();
 
       // Simulate the server sending a tools/list_changed notification
       // where re-discovery fails

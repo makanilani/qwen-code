@@ -320,20 +320,9 @@ export class McpClient {
 }
 
 /**
- * Map to track which servers are currently refreshing tools (for connectAndDiscover path).
- * Prevents concurrent refreshes when the server sends rapid list_changed notifications.
- */
-const serverRefreshingTools: Map<string, boolean> = new Map();
-
-/**
  * Map to track the status of each MCP server within the core package
  */
 const serverStatuses: Map<string, MCPServerStatus> = new Map();
-
-/**
- * Track the overall MCP discovery state
- */
-let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
 
 /**
  * Map to track which MCP servers have been discovered to require OAuth
@@ -396,13 +385,6 @@ export function getMCPServerStatus(serverName: string): MCPServerStatus {
  */
 export function getAllMCPServerStatuses(): Map<string, MCPServerStatus> {
   return new Map(serverStatuses);
-}
-
-/**
- * Get the current MCP discovery state
- */
-export function getMCPDiscoveryState(): MCPDiscoveryState {
-  return mcpDiscoveryState;
 }
 
 /**
@@ -550,48 +532,6 @@ async function createTransportWithOAuth(
   }
 }
 
-/**
- * Discovers tools from all configured MCP servers and registers them with the tool registry.
- * It orchestrates the connection and discovery process for each server defined in the
- * configuration, as well as any server specified via a command-line argument.
- *
- * @param mcpServers A record of named MCP server configurations.
- * @param mcpServerCommand An optional command string for a dynamically specified MCP server.
- * @param toolRegistry The central registry where discovered tools will be registered.
- * @returns A promise that resolves when the discovery process has been attempted for all servers.
- */
-
-export async function discoverMcpTools(
-  mcpServers: Record<string, MCPServerConfig>,
-  mcpServerCommand: string | undefined,
-  toolRegistry: ToolRegistry,
-  promptRegistry: PromptRegistry,
-  debugMode: boolean,
-  workspaceContext: WorkspaceContext,
-  cliConfig: Config,
-): Promise<void> {
-  mcpDiscoveryState = MCPDiscoveryState.IN_PROGRESS;
-  try {
-    mcpServers = populateMcpServerCommand(mcpServers, mcpServerCommand);
-
-    const discoveryPromises = Object.entries(mcpServers).map(
-      ([mcpServerName, mcpServerConfig]) =>
-        connectAndDiscover(
-          mcpServerName,
-          mcpServerConfig,
-          toolRegistry,
-          promptRegistry,
-          debugMode,
-          workspaceContext,
-          cliConfig,
-        ),
-    );
-    await Promise.all(discoveryPromises);
-  } finally {
-    mcpDiscoveryState = MCPDiscoveryState.COMPLETED;
-  }
-}
-
 /** Visible for Testing */
 export function populateMcpServerCommand(
   mcpServers: Record<string, MCPServerConfig>,
@@ -610,126 +550,6 @@ export function populateMcpServerCommand(
     };
   }
   return mcpServers;
-}
-
-/**
- * Connects to an MCP server and discovers available tools, registering them with the tool registry.
- * This function handles the complete lifecycle of connecting to a server, discovering tools,
- * and cleaning up resources if no tools are found.
- *
- * @param mcpServerName The name identifier for this MCP server
- * @param mcpServerConfig Configuration object containing connection details
- * @param toolRegistry The registry to register discovered tools with
- * @param sendSdkMcpMessage Optional callback for SDK MCP servers to route messages via control plane.
- * @returns Promise that resolves when discovery is complete
- */
-export async function connectAndDiscover(
-  mcpServerName: string,
-  mcpServerConfig: MCPServerConfig,
-  toolRegistry: ToolRegistry,
-  promptRegistry: PromptRegistry,
-  debugMode: boolean,
-  workspaceContext: WorkspaceContext,
-  cliConfig: Config,
-  sendSdkMcpMessage?: SendSdkMcpMessage,
-): Promise<void> {
-  updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTING);
-
-  let mcpClient: Client | undefined;
-  try {
-    mcpClient = await connectToMcpServer(
-      mcpServerName,
-      mcpServerConfig,
-      debugMode,
-      workspaceContext,
-      sendSdkMcpMessage,
-    );
-
-    mcpClient.onerror = (error) => {
-      debugLogger.error(`MCP ERROR (${mcpServerName}):`, error.toString());
-      updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
-    };
-
-    // Register handler for dynamic tool list changes IMMEDIATELY after connecting.
-    // Some MCP servers (e.g., Google Colab) send notifications/tools/list_changed
-    // during the discovery window, so the handler must be registered before
-    // we call discoverPrompts/discoverTools.
-    mcpClient.setNotificationHandler(
-      ToolListChangedNotificationSchema,
-      async () => {
-        // Guard against concurrent refreshes
-        if (serverRefreshingTools.get(mcpServerName)) {
-          debugLogger.info(
-            `Server '${mcpServerName}' announced tool list change but refresh already in progress, skipping`,
-          );
-          return;
-        }
-
-        debugLogger.info(
-          `Server '${mcpServerName}' announced tool list change, refreshing tools`,
-        );
-
-        serverRefreshingTools.set(mcpServerName, true);
-        try {
-          toolRegistry.removeMcpToolsByServer(mcpServerName);
-          const refreshedTools = await discoverTools(
-            mcpServerName,
-            mcpServerConfig,
-            mcpClient!,
-            cliConfig,
-          );
-          for (const tool of refreshedTools) {
-            toolRegistry.registerTool(tool);
-          }
-          debugLogger.info(
-            `Refreshed ${refreshedTools.length} tools from server '${mcpServerName}'`,
-          );
-        } catch (error) {
-          debugLogger.error(
-            `Failed to refresh tools from server '${mcpServerName}': ${getErrorMessage(error)}`,
-          );
-        } finally {
-          serverRefreshingTools.set(mcpServerName, false);
-        }
-      },
-    );
-
-    // Attempt to discover both prompts and tools
-    const prompts = await discoverPrompts(
-      mcpServerName,
-      mcpClient,
-      promptRegistry,
-    );
-    const tools = await discoverTools(
-      mcpServerName,
-      mcpServerConfig,
-      mcpClient,
-      cliConfig,
-    );
-
-    // If we have neither prompts nor tools, it's a failed discovery
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
-    }
-
-    // If we found anything, the server is connected
-    updateMCPServerStatus(mcpServerName, MCPServerStatus.CONNECTED);
-
-    // Register any discovered tools
-    for (const tool of tools) {
-      toolRegistry.registerTool(tool);
-    }
-  } catch (error) {
-    if (mcpClient) {
-      mcpClient.close();
-    }
-    debugLogger.error(
-      `Error connecting to MCP server '${mcpServerName}': ${getErrorMessage(
-        error,
-      )}`,
-    );
-    updateMCPServerStatus(mcpServerName, MCPServerStatus.DISCONNECTED);
-  }
 }
 
 /**
